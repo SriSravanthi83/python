@@ -1,0 +1,75 @@
+SELECT 
+    filtered_data.order_id AS ID,
+    filtered_data.shipping_request_id AS "AWS shipment id",
+    filtered_data.created_at AS "Created on",
+    filtered_data.lsp AS Carrier, 
+    filtered_data.tracking_number AS "Tracking number",
+    filtered_data.mode_of_transport AS MOT,
+    filtered_data.shipfromlocationname AS Origin,
+    filtered_data.shiptolocationname AS Destination,
+    filtered_data.ipn AS "Part Number",
+    filtered_data.quantity AS Qty,
+    filtered_data.service_level AS "Service level",
+    filtered_data.actual_pick_up_date AS "Actual Pick Up Date",
+    filtered_data.actual_delivery_date AS "Actual Delivery Date",
+    filtered_data.state AS "Transit Status"
+FROM (
+    SELECT 
+        a.shipping_request_id,
+        a.created_at,
+        a.service_level,
+        a.state,
+        a.mode_of_transport,
+        e.lsp,
+        b.tracking_number,
+        e.shipfromlocationname,
+        e.shiptolocationname,
+        b.actual_pick_up_date,
+        b.actual_delivery_date,
+        f.order_id,
+        f.ipn,
+        f.quantity
+    FROM (
+        -- Get latest version of raw_shipping_requests
+        SELECT shipping_request_id, created_at, service_level, state, mode_of_transport, shipper_reference
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY shipping_request_id ORDER BY version DESC) AS rn
+            FROM "dev"."ext_caspian_shipments"."raw_shipping_requests"
+        ) subquery
+        WHERE rn = 1
+    ) a
+    LEFT JOIN (
+        -- Get latest version of raw_shipment_pkg
+        SELECT shipping_request_id, tracking_number, actual_pick_up_date, actual_delivery_date
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY shipping_request_id ORDER BY version DESC) AS rn
+            FROM "dev"."ext_caspian_gen"."raw_shipment_pkg"
+        ) subquery
+        WHERE rn = 1
+    ) b ON a.shipping_request_id = b.shipping_request_id
+    LEFT JOIN "dev"."ext_caspian_shipments"."raw_shipping_request_shipment_references" c
+        ON a.shipping_request_id = c.shipping_request_id
+    LEFT JOIN acl.logistic_attributes d
+        ON a.shipping_request_id = d.shipping_request_id
+    LEFT JOIN acl.logistic_events e
+        ON a.shipping_request_id = e.shipping_request_id
+    LEFT JOIN (
+        -- Get latest version of shipment package items
+        SELECT shipment_package_id, order_id, ipn, quantity
+        FROM (
+            SELECT shipment_package_id, order_id, ipn, quantity, 
+                   ROW_NUMBER() OVER (PARTITION BY shipment_package_id ORDER BY shipment_package_version DESC) AS rn
+            FROM ext_caspian_gen.raw_shipment_pkg_shipment_items
+        ) subquery
+        WHERE rn = 1
+    ) f ON e.shipment_package_id = f.shipment_package_id
+    LEFT JOIN (
+        -- Pre-filtered QA89 PO Numbers
+        SELECT DISTINCT po_number_oracle 
+        FROM ext_manual_andes.gcp_po_invoice_flat
+        WHERE segment7_po = 'QA89'
+    ) g ON c.shipment_reference_value = g.po_number_oracle
+    WHERE UPPER(a.shipper_reference) = 'NVICIT'
+        AND a.created_at > '2023-07-20'
+        AND a.state != 'Cancelled'
+) AS filtered_data;
